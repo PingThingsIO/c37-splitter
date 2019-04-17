@@ -201,6 +201,9 @@ func readFrame(in *bufio.Reader) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if skipped != 0 {
+		lg.Warningf("skipped %d bytes resyncing C37 frame", skipped)
+	}
 
 	hdr := [14]byte{}
 	_, err = io.ReadFull(in, hdr[1:])
