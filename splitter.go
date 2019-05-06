@@ -3,6 +3,7 @@ package c37splitter
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
@@ -32,8 +33,13 @@ type SplitterConfig struct {
 
 	//If true, additional downstream channels will be created on-the-fly
 	//for connections made to DownstreamListenAddress
-	ListenDownstream        bool   `yaml:"listenDownstream"`
-	DownstreamListenAddress string `yaml:"downstreamListenAddress"`
+	ListenDownstream           bool   `yaml:"listenDownstream"`
+	DownstreamListenAddress    string `yaml:"downstreamListenAddress"`
+	ListenDownstreamTLS        bool   `yaml:"listenDownstreamTLS"`
+	DownstreamListenAddressTLS string `yaml:"downstreamListenAddressTLS"`
+	Certificate                string `yaml:"certificate"`
+	Key                        string `yaml:"key"`
+
 	//These are the addresses we dial to pass traffic to
 	DialDownstreamAddresses []string `yaml:"dialDownstreamAddresses"`
 }
@@ -66,7 +72,7 @@ func StartSplitter(cfg *SplitterConfig) *Splitter {
 
 //Proxy a downstream connection, returning an error upon connection
 //close
-func (s *Splitter) proxyDownstream(id string, conn *net.TCPConn) {
+func (s *Splitter) proxyDownstream(id string, conn net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
 		s.mu.Lock()
@@ -115,6 +121,11 @@ func (s *Splitter) beginDownstreamConnections() {
 			s.listenDownstream(s.cfg.DownstreamListenAddress)
 		}()
 	}
+	if s.cfg.ListenDownstreamTLS {
+		go func() {
+			s.listenDownstreamTLS(s.cfg.DownstreamListenAddressTLS, s.cfg.Certificate, s.cfg.Key)
+		}()
+	}
 	//For each downstream address, dial it in a loop
 	for _, ds := range s.cfg.DialDownstreamAddresses {
 		go func(ds string) {
@@ -145,6 +156,35 @@ func (s *Splitter) listenDownstream(address string) {
 			continue
 		}
 		lg.Infof("[downstream/listen] accepted downstream connection from %s", conn.RemoteAddr().String())
+		go func() {
+			s.proxyDownstream("incoming/"+conn.RemoteAddr().String(), conn)
+		}()
+	}
+}
+
+//Start a listening socket for downstream connections with TLS
+func (s *Splitter) listenDownstreamTLS(address string, cert, key string) {
+	var conn net.Conn
+
+	cer, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		lg.Fatalf("could not load certificate: %v", err)
+
+	}
+
+	config := &tls.Config{Certificates: []tls.Certificate{cer}}
+
+	listener, err := tls.Listen("tcp", address, config)
+	if err != nil {
+		lg.Fatalf("could not initiate downstream listening: %v", err)
+	}
+	for {
+		conn, err = listener.Accept()
+		if err != nil {
+			lg.Warning("failed to accept connection: %v", err)
+			continue
+		}
+		lg.Infof("[downstream/listen.tls] accepted downstream connection from %s", conn.RemoteAddr().String())
 		go func() {
 			s.proxyDownstream("incoming/"+conn.RemoteAddr().String(), conn)
 		}()

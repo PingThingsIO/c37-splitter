@@ -9,6 +9,12 @@ upstreamListenAddress: 0.0.0.0:4713
 listenDownstream: true
 # used if the above is true
 downstreamListenAddress: 0.0.0.0:4714
+
+listenDownstreamTLS: true
+downstreamListenAddressTLS: 0.0.0.0:4715
+certificate:
+key:
+
 # in addition to the above, these addresses, if provided, will be dialed
 # for downstream relay
 dialDownstreamAddresses:
