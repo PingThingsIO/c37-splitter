@@ -141,6 +141,17 @@ func (s *Splitter) beginDownstreamConnections() {
 			}
 		}(ds)
 	}
+
+	//For each downstream TLS address, dial it in a loop
+	for _, ds := range s.cfg.DialDownstreamAddressesTLS {
+		go func(ds string) {
+			for {
+				//This already logs any error
+				s.dialDownstreamTLS(ds)
+				time.Sleep(5 * time.Second)
+			}
+		}(ds)
+	}
 }
 
 //Start a listening socket for downstream connections
