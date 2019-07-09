@@ -27,6 +27,7 @@ type SplitterConfig struct {
 	//for a TCP connection on the given address. Only one connection will be
 	//accepted
 	DialUpstream          bool   `yaml:"dialUpstream"`
+	UpstreamListenTLS     bool   `yaml:"upstreamListenTLS"`
 	UpstreamListenAddress string `yaml:"upstreamListenAddress"`
 	//If DialUpstream is true, this is the address we will attempt to dial
 	UpstreamDialAddress string `yaml:"upstreamDialAddress"`
@@ -37,11 +38,15 @@ type SplitterConfig struct {
 	DownstreamListenAddress    string `yaml:"downstreamListenAddress"`
 	ListenDownstreamTLS        bool   `yaml:"listenDownstreamTLS"`
 	DownstreamListenAddressTLS string `yaml:"downstreamListenAddressTLS"`
-	Certificate                string `yaml:"certificate"`
-	Key                        string `yaml:"key"`
+
+	//This is used for listening TLS, both upstream and downstream
+	Certificate string `yaml:"certificate"`
+	Key         string `yaml:"key"`
 
 	//These are the addresses we dial to pass traffic to
 	DialDownstreamAddresses []string `yaml:"dialDownstreamAddresses"`
+	//These are the addresses we dial to pass traffic to, using TLS
+	DialDownstreamAddressesTLS []string `yaml:"dialDownstreamAddressesTLS"`
 }
 
 //A splitter manages upstream and downstream connections, proxying the
@@ -214,6 +219,22 @@ func (s *Splitter) dialDownstream(target string) {
 	s.proxyDownstream("outgoing/"+addr.String(), conn)
 }
 
+func (s *Splitter) dialDownstreamTLS(target string) {
+	var conn *tls.Conn
+	defer func() {
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+	conn, err := tls.Dial("tcp", target, &tls.Config{})
+	if err != nil {
+		lg.Warningf("[downstream/%s] dial failed", target)
+		return
+	}
+	lg.Infof("[downstream/%s] downstream dial succeeded\n", target)
+	s.proxyDownstream("outgoing/"+target, conn)
+}
+
 //Process the upstream connection
 func (s *Splitter) beginUpstreamConnection() {
 	for {
@@ -221,7 +242,12 @@ func (s *Splitter) beginUpstreamConnection() {
 		if s.cfg.DialUpstream {
 			s.dialUpstream()
 		} else {
-			s.listenUpstream()
+			//These don't return
+			if s.cfg.UpstreamListenTLS {
+				s.listenUpstreamTLS()
+			} else {
+				s.listenUpstream()
+			}
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -262,7 +288,7 @@ func readFrame(in *bufio.Reader) ([]byte, error) {
 }
 
 //Process an upstream connection
-func (s *Splitter) proxyUpstream(out *net.TCPConn, in *bufio.Reader) {
+func (s *Splitter) proxyUpstream(out net.Conn, in *bufio.Reader) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		for {
@@ -329,11 +355,7 @@ func (s *Splitter) dialUpstream() {
 
 func (s *Splitter) listenUpstream() {
 	var conn *net.TCPConn
-	defer func() {
-		if conn != nil {
-			conn.Close()
-		}
-	}()
+
 	addr, err := net.ResolveTCPAddr("tcp", s.cfg.UpstreamListenAddress)
 	if err != nil {
 		lg.Errorf("[upstream] could not resolve listen address: %v", err)
@@ -345,11 +367,42 @@ func (s *Splitter) listenUpstream() {
 		lg.Errorf("[upstream] could not open listen socket: %v", err)
 		return
 	}
-	conn, err = listener.AcceptTCP()
-	if err != nil {
-		lg.Errorf("[upstream] listen accept error: %v", err)
-		return
+	for {
+		conn, err = listener.AcceptTCP()
+		if err != nil {
+			lg.Errorf("[upstream] listen accept error: %v", err)
+			return
+		}
+		br := bufio.NewReader(conn)
+		s.proxyUpstream(conn, br)
+		conn.Close()
 	}
-	br := bufio.NewReader(conn)
-	s.proxyUpstream(conn, br)
+}
+
+func (s *Splitter) listenUpstreamTLS() {
+	var conn net.Conn
+
+	cer, err := tls.LoadX509KeyPair(s.cfg.Certificate, s.cfg.Key)
+	if err != nil {
+		lg.Fatalf("could not load certificate: %v", err)
+	}
+
+	config := &tls.Config{Certificates: []tls.Certificate{cer}}
+
+	listener, err := tls.Listen("tcp", s.cfg.UpstreamListenAddress, config)
+	if err != nil {
+		lg.Fatalf("could not initiate upstream listening: %v", err)
+	}
+	for {
+		conn, err = listener.Accept()
+		if err != nil {
+			lg.Warning("failed to accept connection: %v", err)
+			return
+		}
+
+		lg.Infof("[upstream/listen.tls] accepted upstream connection from %s", conn.RemoteAddr().String())
+		br := bufio.NewReader(conn)
+		s.proxyUpstream(conn, br)
+		conn.Close()
+	}
 }
